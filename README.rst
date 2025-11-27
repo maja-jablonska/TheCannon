@@ -36,3 +36,8 @@ Projects
 
 * Label Transfer from APOGEE to LAMOST: Precise Stellar Parameters for 450,000 LAMOST Giants
 * Masses and Ages for 230,000 LAMOST Giants, via Their Carbon and Nitrogen Abundances
+
+Maintenance
+-----------
+
+To keep the package lean, historical example scripts and duplicate JAX modules have been removed. The core ``TheCannon`` package remains the primary interface for training models and inferring labels.
