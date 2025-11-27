@@ -568,7 +568,7 @@ def convert_to_hdulist(ds):
     # construct HDU list
     assert len(data_list) == len(name_list)
     n_hdus = len(data_list)
-    for i in xrange(n_hdus):
+    for i in range(n_hdus):
         if hdu_format_list_rw[i] == 'table':
             data = Table(data=data_list[i].reshape((-1, 1)),
                          names=[name_list[i]])
