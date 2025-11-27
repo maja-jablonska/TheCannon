@@ -9,6 +9,7 @@ import sys
 import matplotlib.pyplot as plt
 import glob
 from astropy.table import Table
+from .. import Dataset
 
 # python 3 special
 PY3 = sys.version_info[0] > 2

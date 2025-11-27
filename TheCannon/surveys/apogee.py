@@ -5,9 +5,8 @@ import numpy as np
 import scipy.optimize as opt
 import os
 import sys
-import matplotlib.pyplot as plt
 from astropy.io import ascii
-from TheCannon import *
+from tqdm import tqdm
 
 # python 3 special
 PY3 = sys.version_info[0] > 2
@@ -103,28 +102,44 @@ def load_spectra(data_dir):
         Inverse variance values corresponding to flux values
     """
     print("Loading spectra from directory %s" %data_dir)
-    files = list(sorted([data_dir + "/" + filename
+    files = list(sorted([os.path.join(data_dir, filename)
              for filename in os.listdir(data_dir) if filename.endswith('fits')]))
-    nstars = len(files)  
-    for jj, fits_file in enumerate(files):
-        file_in = pyfits.open(fits_file)
+    nstars = len(files)
+    
+    if nstars == 0:
+        print("No fits files found in %s" % data_dir)
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    # Read the first file to get dimensions and wavelength info
+    with pyfits.open(files[0]) as file_in:
         flux = np.array(file_in[1].data)
-        if jj == 0:
-            npixels = len(flux)
-            fluxes = np.zeros((nstars, npixels), dtype=float)
-            ivars = np.zeros(fluxes.shape, dtype=float)
-            start_wl = file_in[1].header['CRVAL1']
-            diff_wl = file_in[1].header['CDELT1']
-            val = diff_wl * (npixels) + start_wl
-            wl_full_log = np.arange(start_wl,val, diff_wl)
-            wl_full = [10 ** aval for aval in wl_full_log]
-            wl = np.array(wl_full)
-        flux_err = np.array((file_in[2].data))
+        npixels = len(flux)
+        start_wl = file_in[1].header['CRVAL1']
+        diff_wl = file_in[1].header['CDELT1']
+    
+    # Pre-allocate arrays
+    fluxes = np.zeros((nstars, npixels), dtype=float)
+    ivars = np.zeros((nstars, npixels), dtype=float)
+    
+    # Vectorize wavelength calculation
+    val = diff_wl * npixels + start_wl
+    wl_full_log = np.arange(start_wl, val, diff_wl)
+    wl = 10 ** wl_full_log
+    
+    for jj, fits_file in tqdm(enumerate(files), desc="Loading spectra"):
+        with pyfits.open(fits_file) as file_in:
+            flux = np.array(file_in[1].data)
+            flux_err = np.array(file_in[2].data)
+            
         badpix = get_pixmask(flux, flux_err)
         ivar = np.zeros(npixels)
-        ivar[~badpix] = 1. / flux_err[~badpix]**2
+        # Avoid division by zero warnings if any
+        valid = ~badpix
+        ivar[valid] = 1. / flux_err[valid]**2
+        
         fluxes[jj,:] = flux
         ivars[jj,:] = ivar
+        
     # convert filenames to actual IDs
     names = np.array([f.split('v304-')[1].split('.fits')[0] for f in files])
     print("Spectra loaded")
@@ -176,6 +191,8 @@ def continuum_normalize_training(ds):
     
     """
 
+    from .. import CannonModel, Dataset
+    from .. import model
     # To initialize the continuum-pixel determination, we define a
     # preliminary pseudo-continuum-normalization by using a polynomial
     # fit to an upper quantile (in this case 90%) of the spectra, determined

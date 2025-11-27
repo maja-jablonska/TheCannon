@@ -1,14 +1,18 @@
 """ Generate model spectra, add model attribute """
 
-def draw_spectra(md, ds):
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+
+def draw_spectra(model, dataset):
     """ Generate best-fit spectra for all the test objects  
 
     Parameters
     ----------
-    md: model
+    model: model
         The Cannon spectral model
 
-    ds: Dataset 
+    dataset: Dataset 
         Dataset object
 
     Returns
@@ -19,7 +23,7 @@ def draw_spectra(md, ds):
     best_ivars:
         The best-fit test inverse variances
     """
-    coeffs_all, covs, scatters, red_chisqs, pivots, label_vector = model.model
+    coeffs_all, covs, scatters, red_chisqs, pivots, label_vector = model.model()
     nstars = len(dataset.test_SNR)
     cannon_flux = np.zeros(dataset.test_flux.shape)
     cannon_ivar = np.zeros(dataset.test_ivar.shape)

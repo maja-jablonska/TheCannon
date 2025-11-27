@@ -316,16 +316,11 @@ class Dataset(object):
         # don't use too many process
         assert n_proc >= 1 and n_proc <= 100*n_cpus
         if n_proc > n_cpus:
-            print('@Bo Zhang: n_proc is larger than your numbers of physical CPUs!')
+            print('Warning: n_proc is larger than your numbers of physical CPUs!')
 
         print("Continuum normalizing the tr set using running quantile...")
 
         if n_proc == 1:
-            # use old version (single process)
-            print('##########################################################')
-            print('@Bo Zhang: you will use only 1 process ...')
-            print('           i.e., the original TheCannon version')
-            print('##########################################################')
             if self.ranges is None:
                 return _cont_norm_running_quantile(
                     self.wl, self.tr_flux, self.tr_ivar,
@@ -338,10 +333,7 @@ class Dataset(object):
                     ranges=self.ranges, verbose=verbose)
         else:
             # use new version (multi process)
-            print('##########################################################')
-            print('@Bo Zhang: you will use ** %d ** processes ... ' % n_proc)
-            print('Note: Multiprocessing calls for more memory on computer!')
-            print('##########################################################')
+            print('Using %d processes ... ' % n_proc)
             if self.ranges is None:
                 return _cont_norm_running_quantile_mp(
                     self.wl, self.tr_flux, self.tr_ivar,
@@ -518,16 +510,12 @@ class Dataset(object):
 
     def write_to_fits(self, filepath, **kwargs):
         hl = convert_to_hdulist(self)
-        print('@Bo Zhang: writting to fits [%s] ...' % filepath)
+        print('Writing to fits [%s] ...' % filepath)
         hl.writeto(filepath, **kwargs)
-        print('@Bo Zhang: ---------------------------------------------------')
 
 
 def convert_to_hdulist(ds):
     """ transform TheCannon dataset into fits HDU list """
-    print('@Bo Zhang: ---------------------------------------------------')
-    print('@Bo Zhang: transforming TheCannon data cubes into HDU list ...')
-    print('@Bo Zhang: ---------------------------------------------------')
 
     # initialize data list
     data_list = [ds.wl,
@@ -575,15 +563,12 @@ def convert_to_hdulist(ds):
     header['data'] = 'TheCannon dataset object'
 
     # initialize HDU list
-    print('@Bo Zhang: initializing the HDU list ...')
     hl = [fits.hdu.PrimaryHDU(header=header)]
 
     # construct HDU list
     assert len(data_list) == len(name_list)
     n_hdus = len(data_list)
     for i in xrange(n_hdus):
-        print('@Bo Zhang: transforming HDU [%d/%d]: %s ...'
-              % (i+1, n_hdus, name_list[i]))
         if hdu_format_list_rw[i] == 'table':
             data = Table(data=data_list[i].reshape((-1, 1)),
                          names=[name_list[i]])
@@ -592,5 +577,4 @@ def convert_to_hdulist(ds):
             hl.append(fits.ImageHDU(data=np.array(data_list[i]),
                                     name=name_list[i]))
 
-    print('@Bo Zhang: ---------------------------------------------------')
     return fits.HDUList(hl)
