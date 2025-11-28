@@ -8,21 +8,57 @@ rc('text', usetex=True)
 rc('font', family='serif')
 from .helpers.corner import corner
 from .helpers import Table
-from .find_continuum_pixels import * 
-from .normalization import \
-    (_cont_norm_gaussian_smooth,
-     _cont_norm_running_quantile,
-     _cont_norm_running_quantile_regions,
-     _cont_norm_running_quantile_mp,
-     _cont_norm_running_quantile_regions_mp,
-     _find_cont_fitfunc,
-     _find_cont_fitfunc_regions,
-     _cont_norm,
-     _cont_norm_regions)
+from .find_continuum_pixels import *
+try:
+    from .normalization import \
+        (_cont_norm_gaussian_smooth,
+         _cont_norm_running_quantile,
+         _cont_norm_running_quantile_regions,
+         _cont_norm_running_quantile_mp,
+         _cont_norm_running_quantile_regions_mp,
+         _find_cont_fitfunc,
+         _find_cont_fitfunc_regions,
+         _cont_norm,
+         _cont_norm_regions)
+    _NORMALIZATION_AVAILABLE = True
+except ImportError:
+    _cont_norm_gaussian_smooth = None
+    _cont_norm_running_quantile = None
+    _cont_norm_running_quantile_regions = None
+    _cont_norm_running_quantile_mp = None
+    _cont_norm_running_quantile_regions_mp = None
+    _find_cont_fitfunc = None
+    _find_cont_fitfunc_regions = None
+    _cont_norm = None
+    _cont_norm_regions = None
+    _NORMALIZATION_AVAILABLE = False
 from .find_continuum_pixels import _find_contpix,_find_contpix_regions
 from multiprocessing import cpu_count
-from astropy.io import fits
-from astropy.table import Table
+try:
+    from astropy.io import fits
+    from astropy.table import Table
+except ImportError:  # pragma: no cover - optional dependency
+    fits = None
+    Table = None
+
+
+class _ArraySource(object):
+    """Lightweight wrapper around array-like inputs with optional cleanup."""
+
+    def __init__(self, data, closer=None):
+        self.data = data
+        self._closer = closer
+
+    def close(self):
+        if self._closer is not None:
+            self._closer()
+
+    def __len__(self):
+        return len(self.data)
+
+    @property
+    def shape(self):
+        return self.data.shape
 
 n_cpus = cpu_count()
 
@@ -34,41 +70,71 @@ else:
     basestring = (str, unicode)
 
 
+def _require_normalization():
+    if not _NORMALIZATION_AVAILABLE:
+        raise ImportError(
+            "Normalization utilities require optional dependencies (jax/astropy)."
+        )
+
+
 class Dataset(object):
     """ A class to represent Cannon input: a dataset of spectra and labels """
 
-    def __init__(self, wl, tr_ID, tr_flux, tr_ivar, tr_label, test_ID, test_flux, test_ivar):
+    def __init__(self, wl, tr_ID, tr_flux, tr_ivar, tr_label, test_ID,
+                 test_flux, test_ivar, snr_chunk_size=None):
         """ Initiate a Dataset object
 
         Parameters
         ----------
         wl: grid of wavelength values, onto which all spectra are mapped
         tr_ID: array of IDs of training objects
-        tr_flux: array of flux values for training objects, [nobj, npix]
-        tr_ivar: array [nobj, npix] of inverse variance values for training objects
+        tr_flux: array of flux values for training objects, [nobj, npix]. May also
+            be a tuple of (path, dataset/extension) pointing to an HDF5 or FITS
+            dataset for on-demand reads, or a FITS filepath for memmapped
+            reading.
+        tr_ivar: array [nobj, npix] of inverse variance values for training
+            objects
         tr_label: array [nobj, nlabel]
         test_ID: array [nobj[ of IDs of test objects
-        test_flux: array [nobj, npix] of flux values for test objects
-        test_ivar: array [nobj, npix] of inverse variance values for test objects
+        test_flux: array [nobj, npix] of flux values for test objects. Same
+            on-disk options as ``tr_flux`` are supported.
+        test_ivar: array [nobj, npix] of inverse variance values for test
+            objects
+        snr_chunk_size: optional int
+            Number of spectra to process at once when computing SNRs.
         """
         print("Loading dataset")
         print("This may take a while...")
         self.wl = wl
         self.tr_ID = tr_ID
-        self.tr_flux = tr_flux
-        self.tr_ivar = tr_ivar
-        self.tr_label = tr_label
         self.test_ID = test_ID
-        self.test_flux = test_flux
-        self.test_ivar = test_ivar
+        self.tr_label = tr_label
+        self._managed_sources = []
+
+        self.tr_flux = self._load_array_source(tr_flux, 'tr_flux').data
+        self.tr_ivar = self._load_array_source(tr_ivar, 'tr_ivar').data
+        self.test_flux = self._load_array_source(test_flux, 'test_flux').data
+        self.test_ivar = self._load_array_source(test_ivar, 'test_ivar').data
         self._label_names = None
         self.ranges = None
-        
-        # calculate SNR
-        self.tr_SNR = np.array(
-                [self._SNR(*s) for s in zip(tr_flux, tr_ivar)])
-        self.test_SNR = np.array(
-                [self._SNR(*s) for s in zip(test_flux, test_ivar)])
+
+        # calculate SNR using vectorized masked operations
+        self.tr_SNR = self._vectorized_snr(self.tr_flux, self.tr_ivar,
+                                           chunk_size=snr_chunk_size)
+        self.test_SNR = self._vectorized_snr(self.test_flux, self.test_ivar,
+                                             chunk_size=snr_chunk_size)
+
+    def close(self):
+        """Close any managed on-disk array sources."""
+
+        for source in self._managed_sources:
+            source.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
     def _SNR(self, flux, ivar):
@@ -87,7 +153,71 @@ class Dataset(object):
         """
         take = ivar > 0
         SNR = float(np.median(flux[take]*(ivar[take]**0.5)))
-        return SNR  
+        return SNR
+
+    def _load_array_source(self, source, name):
+        """Return an array-like source, optionally backed by disk storage."""
+
+        if isinstance(source, _ArraySource):
+            self._managed_sources.append(source)
+            return source
+
+        if isinstance(source, tuple) and len(source) == 2:
+            path, key = source
+            if isinstance(path, basestring) and path.endswith(('.h5', '.hdf5')):
+                try:
+                    import h5py
+                except ImportError:
+                    raise ImportError(
+                        "h5py is required to read HDF5 flux/ivar sources")
+                handle = h5py.File(path, 'r')
+                data = handle[key]
+                wrapped = _ArraySource(data, closer=handle.close)
+                self._managed_sources.append(wrapped)
+                return wrapped
+            if isinstance(path, basestring) and path.endswith(('.fits', '.fit', '.fz')):
+                if fits is None:
+                    raise ImportError(
+                        "astropy is required to read FITS-backed sources")
+                hdul = fits.open(path, memmap=True)
+                data = hdul[key].data
+                wrapped = _ArraySource(data, closer=hdul.close)
+                self._managed_sources.append(wrapped)
+                return wrapped
+
+        if isinstance(source, basestring) and source.endswith((
+                '.fits', '.fit', '.fz')):
+            if fits is None:
+                raise ImportError(
+                    "astropy is required to read FITS-backed sources")
+            hdul = fits.open(source, memmap=True)
+            data = hdul[0].data
+            wrapped = _ArraySource(data, closer=hdul.close)
+            self._managed_sources.append(wrapped)
+            return wrapped
+
+        wrapped = _ArraySource(source)
+        self._managed_sources.append(wrapped)
+        return wrapped
+
+    def _vectorized_snr(self, fluxes, ivars, chunk_size=None):
+        """Vectorized SNR calculation using masked medians per spectrum."""
+
+        n_objects = len(fluxes)
+        if chunk_size is None:
+            chunk_size = n_objects
+
+        snr_values = []
+        for start in range(0, n_objects, chunk_size):
+            stop = min(start + chunk_size, n_objects)
+            flux_chunk = fluxes[start:stop]
+            ivar_chunk = ivars[start:stop]
+            with np.errstate(invalid='ignore'):
+                scaled = flux_chunk * np.sqrt(ivar_chunk)
+            masked = np.where(ivar_chunk > 0, scaled, np.nan)
+            snr_chunk = np.nanmedian(masked, axis=1)
+            snr_values.append(snr_chunk)
+        return np.concatenate(snr_values)
 
 
     def set_label_names(self, names):
@@ -116,6 +246,7 @@ class Dataset(object):
             return self._label_names
 
 
+    @staticmethod
     def bin_flux(flux, ivar):
         """ bin two neighboring flux values """
         if np.sum(ivar)==0:
@@ -123,9 +254,10 @@ class Dataset(object):
         return np.average(flux, weights=ivar)
 
 
+    @staticmethod
     def smooth_spectrum(wl, flux, ivar):
-        """ Bins down one spectrum 
-        
+        """ Bins down one spectrum
+
         Parameters
         ----------
         wl: numpy ndarray
@@ -154,26 +286,72 @@ class Dataset(object):
         flux = flux.reshape(-1,2)
         wl_binned = np.mean(wl, axis=1)
         ivar_binned = np.sqrt(np.sum(ivar**2, axis=1))
-        flux_binned = np.array([bin_flux(f,w) for f,w in zip(flux, ivar)])
+        flux_binned = np.array([Dataset.bin_flux(f,w) for f,w in zip(flux, ivar)])
         return wl_binned, flux_binned, ivar_binned
 
+    @staticmethod
+    def _iter_batches(values, batch_size):
+        total = len(values)
+        for start in range(0, total, batch_size):
+            stop = min(start + batch_size, total)
+            yield values[start:stop]
 
-    def smooth_spectra(wl, fluxes, ivars):
-        """ Bins down a block of spectra """
-        output = np.asarray(
-                [smooth_spectrum(wl, flux, ivar) for flux,ivar in zip(fluxes, ivars)])
-        return output 
+    @classmethod
+    def smooth_spectra(cls, wl, fluxes, ivars, batch_size=None):
+        """Bin down spectra in memory-aware batches."""
+
+        def _process_batch(batch_fluxes, batch_ivars):
+            wl_blocks, flux_blocks, ivar_blocks = [], [], []
+            for flux, ivar in zip(batch_fluxes, batch_ivars):
+                wl_b, flux_b, ivar_b = cls.smooth_spectrum(wl, flux, ivar)
+                wl_blocks.append(wl_b)
+                flux_blocks.append(flux_b)
+                ivar_blocks.append(ivar_b)
+            return (np.array(wl_blocks), np.array(flux_blocks),
+                    np.array(ivar_blocks))
+
+        if batch_size is None:
+            return _process_batch(fluxes, ivars)
+
+        for f_batch, i_batch in zip(
+                cls._iter_batches(fluxes, batch_size),
+                cls._iter_batches(ivars, batch_size)):
+            yield _process_batch(f_batch, i_batch)
 
 
-    def smooth_dataset(self):
+    def smooth_dataset(self, batch_size=None):
         """ Bins down all of the spectra and updates the dataset """
-        output = smooth_spectra(self.wl, self.tr_flux, self.tr_ivar)
-        self.wl = output[:,0,:]
-        self.tr_flux = output[:,1,:]
-        self.tr_ivar = output[:,2,:]
-        output = smooth_spectra(self.wl, self.test_flux, self.test_ivar)
-        self.test_flux = output[:,1,:]
-        self.test_ivar = output[:,2,:]
+        if batch_size is None:
+            wl_block, tr_flux, tr_ivar = self.smooth_spectra(
+                self.wl, self.tr_flux, self.tr_ivar)
+            self.wl = wl_block[0]
+            self.tr_flux = tr_flux
+            self.tr_ivar = tr_ivar
+            wl_block, test_flux, test_ivar = self.smooth_spectra(
+                self.wl, self.test_flux, self.test_ivar)
+            self.test_flux = test_flux
+            self.test_ivar = test_ivar
+        else:
+            tr_flux_batches, tr_ivar_batches = [], []
+            for wl_block, flux_batch, ivar_batch in self.smooth_spectra(
+                    self.wl, self.tr_flux, self.tr_ivar, batch_size=batch_size):
+                if not hasattr(self, '_smoothed_wl'):
+                    self.wl = wl_block[0]
+                    self._smoothed_wl = True
+                tr_flux_batches.append(flux_batch)
+                tr_ivar_batches.append(ivar_batch)
+            self.tr_flux = np.vstack(tr_flux_batches)
+            self.tr_ivar = np.vstack(tr_ivar_batches)
+
+            test_flux_batches, test_ivar_batches = [], []
+            for wl_block, flux_batch, ivar_batch in self.smooth_spectra(
+                    self.wl, self.test_flux, self.test_ivar,
+                    batch_size=batch_size):
+                self.wl = wl_block[0]
+                test_flux_batches.append(flux_batch)
+                test_ivar_batches.append(ivar_batch)
+            self.test_flux = np.vstack(test_flux_batches)
+            self.test_ivar = np.vstack(test_ivar_batches)
  
 
     def diagnostics_SNR(self): 
@@ -276,6 +454,7 @@ class Dataset(object):
         test_cont: ndarray
             Flux values corresponding to the fitted continuum of test objects
         """
+        _require_normalization()
         print("Fitting Continuum...")
         if self.ranges == None:
             tr_cont = _find_cont_fitfunc(
@@ -313,6 +492,8 @@ class Dataset(object):
             Multiprocessing calls for more memory on computer.
         """
 
+        _require_normalization()
+
         # don't use too many process
         assert n_proc >= 1 and n_proc <= 100*n_cpus
         if n_proc > n_cpus:
@@ -347,8 +528,8 @@ class Dataset(object):
 
 
     def continuum_normalize(self, cont):
-        """ 
-        Continuum normalize spectra, in chunks if spectrum has regions 
+        """
+        Continuum normalize spectra, in chunks if spectrum has regions
 
         Parameters
         ----------
@@ -366,6 +547,7 @@ class Dataset(object):
         norm_test_ivar: numpy ndarray
             Rescaled inverse variance values for the test objects
         """
+        _require_normalization()
         tr_cont, test_cont = cont
         if self.ranges is None:
             print("assuming continuous spectra")
@@ -392,6 +574,7 @@ class Dataset(object):
         L: float
             the width of the Gaussian used for weighting
         """
+        _require_normalization()
         norm_tr_flux, norm_tr_ivar, norm_test_flux, norm_test_ivar = \
                 _cont_norm_gaussian_smooth(self, L)
         self.tr_flux = norm_tr_flux
@@ -509,6 +692,8 @@ class Dataset(object):
 
 
     def write_to_fits(self, filepath, **kwargs):
+        if fits is None:
+            raise ImportError("astropy is required to write FITS outputs")
         hl = convert_to_hdulist(self)
         print('Writing to fits [%s] ...' % filepath)
         hl.writeto(filepath, **kwargs)
@@ -516,6 +701,9 @@ class Dataset(object):
 
 def convert_to_hdulist(ds):
     """ transform TheCannon dataset into fits HDU list """
+
+    if fits is None:
+        raise ImportError("astropy is required to write FITS outputs")
 
     # initialize data list
     data_list = [ds.wl,

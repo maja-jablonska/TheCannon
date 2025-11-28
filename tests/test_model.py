@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from TheCannon import CannonModel, Dataset
 
+@unittest.skipUnless(CannonModel is not None, "CannonModel requires optional dependencies (jax)")
 class TestCannonModel(unittest.TestCase):
     def setUp(self):
         self.order = 2
