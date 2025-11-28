@@ -50,9 +50,10 @@ from numpy.lib import recfunctions
 try:
     from astropy.io import fits as pyfits
 except ImportError:
-    import pyfits
-except:
-    pyfits = None
+    try:
+        import pyfits
+    except Exception:
+        pyfits = None
 
 try:
     import tables

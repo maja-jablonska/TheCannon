@@ -2,4 +2,7 @@
 try:
     from astropy.io import fits as pyfits
 except ImportError:
-    import pyfits
+    try:
+        import pyfits
+    except Exception:
+        pyfits = None
