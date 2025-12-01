@@ -118,7 +118,7 @@ def _train_pixel(flux, ivar, lvec, scatter_grid):
     
     return best_coeff, best_scatter, best_chisq
 
-def _train_model(ds, batch_size=500):
+def _train_model(ds, batch_size=500, coeffs_memmap_path=None):
     label_vals = ds.tr_label
     fluxes = ds.tr_flux
     ivars = ds.tr_ivar
@@ -141,10 +141,18 @@ def _train_model(ds, batch_size=500):
     scatter_grid = jnp.exp(ln_scatter_vals)
     
     # Batch processing over pixels
-    coeffs_list = []
-    scatters_list = []
-    chisqs_list = []
-    
+    n_terms = lvec.shape[1]
+    dtype = np.asarray(fluxes).dtype
+
+    # Optionally store coefficients on disk when fitting very large wavelength grids
+    if coeffs_memmap_path is not None:
+        coeffs = np.memmap(coeffs_memmap_path, mode="w+", dtype=dtype, shape=(npixels, n_terms))
+    else:
+        coeffs = np.empty((npixels, n_terms), dtype=dtype)
+
+    scatters = np.empty((npixels,), dtype=dtype)
+    chisqs = np.empty((npixels,), dtype=dtype)
+
     indices = range(0, npixels, batch_size)
     if tqdm is not None:
         indices = tqdm(indices, desc="Training model", total=(npixels + batch_size - 1) // batch_size)
@@ -152,19 +160,20 @@ def _train_model(ds, batch_size=500):
     train_func = partial(_train_pixel, lvec=lvec, scatter_grid=scatter_grid)
     
     for i in indices:
-        batch_flux = fluxes[i:i+batch_size]
-        batch_ivar = ivars[i:i+batch_size]
-        
+        batch_end = min(i + batch_size, npixels)
+
+        batch_flux = fluxes[i:batch_end]
+        batch_ivar = ivars[i:batch_end]
+
         b_coeffs, b_scatters, b_chisqs = jax.vmap(train_func)(batch_flux, batch_ivar)
-        
-        coeffs_list.append(b_coeffs)
-        scatters_list.append(b_scatters)
-        chisqs_list.append(b_chisqs)
-        
-    coeffs = jnp.concatenate(coeffs_list, axis=0)
-    scatters = jnp.concatenate(scatters_list, axis=0)
-    chisqs = jnp.concatenate(chisqs_list, axis=0)
-    
+
+        coeffs[i:batch_end] = np.asarray(b_coeffs)
+        scatters[i:batch_end] = np.asarray(b_scatters)
+        chisqs[i:batch_end] = np.asarray(b_chisqs)
+
+    if isinstance(coeffs, np.memmap):
+        coeffs.flush()
+
     return np.array(coeffs), np.array(scatters), np.array(chisqs), pivots, scales
 
 # --- Training with Label Errors ---

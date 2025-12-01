@@ -128,9 +128,9 @@ def _infer_labels(model, dataset, starting_guess=None, batch_size=500):
         starting_guess = np.ones(nlabels)
         
     # Prepare batches
-    labels_list = []
-    errs_list = []
-    chisqs_list = []
+    labels_all = np.empty((nstars, nlabels), dtype=np.asarray(starting_guess).dtype)
+    errs_all = np.empty((nstars, nlabels), dtype=np.asarray(starting_guess).dtype)
+    chisqs_all = np.empty((nstars,), dtype=np.asarray(fluxes).dtype)
     
     indices = range(0, nstars, batch_size)
     if tqdm is not None:
@@ -144,8 +144,10 @@ def _infer_labels(model, dataset, starting_guess=None, batch_size=500):
     batch_infer = jax.vmap(infer_func)
     
     for i in indices:
-        batch_flux = fluxes[i:i+batch_size]
-        batch_ivar = ivars[i:i+batch_size]
+        batch_end = min(i + batch_size, nstars)
+
+        batch_flux = fluxes[i:batch_end]
+        batch_ivar = ivars[i:batch_end]
         
         # Handle bad pixels in input (ivar=0)
         # Original code sets flux to 1.0 where ivar=0, but weight handles it.
@@ -156,16 +158,12 @@ def _infer_labels(model, dataset, starting_guess=None, batch_size=500):
         batch_flux = jnp.where(batch_ivar == 0, 1.0, batch_flux)
         
         b_labels, b_errs, b_chisqs, b_success, b_status = batch_infer(batch_flux, batch_ivar)
-        
-        labels_list.append(b_labels)
-        errs_list.append(b_errs)
-        chisqs_list.append(b_chisqs)
-        
-    labels_all = jnp.concatenate(labels_list, axis=0)
-    errs_all = jnp.concatenate(errs_list, axis=0)
-    chisqs_all = jnp.concatenate(chisqs_list, axis=0)
-    
+
+        labels_all[i:batch_end] = np.asarray(b_labels)
+        errs_all[i:batch_end] = np.asarray(b_errs)
+        chisqs_all[i:batch_end] = np.asarray(b_chisqs)
+
     # Update dataset
     dataset.set_test_label_vals(np.array(labels_all))
-    
+
     return np.array(errs_all), np.array(chisqs_all)
